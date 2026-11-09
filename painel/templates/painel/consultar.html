@@ -56,6 +56,29 @@
         h2 { margin: 0 0 18px; color: var(--cyan); font-size: 1.25rem; }
         .subtitle { margin: 10px 0 26px; color: var(--violet); font-size: 1.15rem; }
         .meta, .status { color: var(--muted); font-size: .9rem; }
+        .quick-nav {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .quick-link {
+            display: inline-flex;
+            align-items: center;
+            min-height: 40px;
+            padding: 7px 13px;
+            border: 1px solid var(--border);
+            border-radius: 9px;
+            background: var(--panel-soft);
+            color: var(--cyan);
+            font-size: .9rem;
+            font-weight: 650;
+            text-decoration: none;
+            transition: border-color .15s ease, background .15s ease;
+        }
+
+        .quick-link:hover { border-color: var(--cyan); background: #142237; }
         .pair-form {
             margin-top: 26px;
             padding: 18px;
@@ -157,7 +180,15 @@
             <p class="subtitle">Consulte moedas, acompanhe o histórico e confira o clima.</p>
             <p class="meta">As cotações são consultadas na AwesomeAPI e ficam em cache por 5 minutos.</p>
 
-            <form class="pair-form" action="{% url 'consultar' %}" method="get">
+            <nav class="quick-nav" aria-label="Acesso rápido">
+                <a class="quick-link" href="#consulta">Consultar moedas</a>
+                <a class="quick-link" href="#grafico-titulo">Ver gráficos</a>
+                <a class="quick-link" href="#historico-titulo">Ver histórico</a>
+                <a class="quick-link" href="{% url 'api-historico' %}">Abrir API JSON</a>
+                <a class="quick-link" href="/admin/">Administração</a>
+            </nav>
+
+            <form id="consulta" class="pair-form" action="{% url 'consultar' %}" method="get">
                 <strong>Escolha os pares de moedas</strong>
                 <div class="pair-options">
                     {% for par, descricao in pares_disponiveis %}
@@ -220,6 +251,9 @@
             <p id="status-grafico" class="status" role="status" aria-live="polite">
                 Carregando gráfico…
             </p>
+            <p id="status-atualizacao" class="status" role="status" aria-live="polite">
+                Atualizações automáticas a cada 60 segundos.
+            </p>
             <div id="graficos-cotacoes" class="chart-wrap"></div>
         </section>
 
@@ -251,6 +285,189 @@
         const tabelaHistorico = document.getElementById('tabela-historico');
         const corpoTabela = tabelaHistorico.querySelector('tbody');
         const containerGraficos = document.getElementById('graficos-cotacoes');
+        const statusAtualizacao = document.getElementById('status-atualizacao');
+        const historico = new Map();
+        const graficos = new Map();
+        const paresSelecionados = Array.from(
+            document.querySelectorAll('input[name="pares"]:checked')
+        ).map(function (input) {
+            return input.value;
+        });
+        const cores = ['#28c5ff', '#ba68ff', '#2dd4a0', '#ffb454', '#ff7385'];
+        let timerAtualizacao;
+        let atualizacaoEmAndamento = false;
+
+        function nomePar(registro) {
+            return registro.moeda_origem + '/' + registro.moeda_destino;
+        }
+
+        function renderizarTabela() {
+            const registros = Array.from(historico.values()).sort(function (a, b) {
+                return new Date(b.data_hora_consulta) - new Date(a.data_hora_consulta)
+                    || b.id - a.id;
+            });
+            corpoTabela.replaceChildren();
+
+            registros.forEach(function (registro) {
+                const linha = document.createElement('tr');
+                const valores = [
+                    nomePar(registro),
+                    registro.valor,
+                    new Date(registro.data_hora_consulta).toLocaleString('pt-BR')
+                ];
+                valores.forEach(function (valor) {
+                    const celula = document.createElement('td');
+                    celula.textContent = valor;
+                    linha.appendChild(celula);
+                });
+                corpoTabela.appendChild(linha);
+            });
+
+            statusHistorico.hidden = registros.length > 0;
+            tabelaHistorico.hidden = registros.length === 0;
+            if (registros.length === 0) {
+                statusHistorico.textContent = 'Nenhuma consulta registrada ainda.';
+            }
+        }
+
+        function criarGrafico(par, indice) {
+            const cartao = document.createElement('article');
+            const titulo = document.createElement('h3');
+            const canvas = document.createElement('canvas');
+            const cor = cores[indice % cores.length];
+
+            cartao.className = 'chart-item';
+            titulo.textContent = par;
+            canvas.setAttribute('aria-label', 'Variação histórica de ' + par);
+            cartao.appendChild(titulo);
+            cartao.appendChild(canvas);
+            containerGraficos.appendChild(cartao);
+
+            const grafico = new Chart(canvas, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: par,
+                        data: [],
+                        borderColor: cor,
+                        backgroundColor: cor,
+                        tension: 0.25
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    scales: {
+                        x: { ticks: { color: '#91a1b9', maxTicksLimit: 6 } },
+                        y: { ticks: { color: '#91a1b9' }, beginAtZero: false }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#edf4ff' } }
+                    }
+                }
+            });
+            graficos.set(par, grafico);
+            return grafico;
+        }
+
+        function renderizarGraficos() {
+            if (typeof Chart === 'undefined') {
+                statusGrafico.textContent =
+                    'Não foi possível carregar a biblioteca do gráfico.';
+                return;
+            }
+
+            const registros = Array.from(historico.values()).sort(function (a, b) {
+                return new Date(a.data_hora_consulta) - new Date(b.data_hora_consulta)
+                    || a.id - b.id;
+            });
+            const pares = [...new Set(registros.map(nomePar))];
+            pares.forEach(function (par, indice) {
+                const grafico = graficos.get(par) || criarGrafico(par, indice);
+                const registrosDoPar = registros.filter(function (registro) {
+                    return nomePar(registro) === par;
+                });
+                grafico.data.labels = registrosDoPar.map(function (registro) {
+                    return new Date(registro.data_hora_consulta).toLocaleString('pt-BR');
+                });
+                grafico.data.datasets[0].data = registrosDoPar.map(function (registro) {
+                    return Number(registro.valor);
+                });
+                grafico.update('none');
+            });
+
+            if (registros.length === 0) {
+                statusGrafico.textContent =
+                    'O gráfico aparecerá após a primeira cotação registrada.';
+                return;
+            }
+            statusGrafico.hidden = true;
+        }
+
+        function adicionarRegistros(registros) {
+            registros.forEach(function (registro) {
+                historico.set(registro.id, registro);
+            });
+
+            const maisRecentes = Array.from(historico.values())
+                .sort(function (a, b) {
+                    return new Date(b.data_hora_consulta) - new Date(a.data_hora_consulta)
+                        || b.id - a.id;
+                })
+                .slice(0, 500);
+            historico.clear();
+            maisRecentes.forEach(function (registro) {
+                historico.set(registro.id, registro);
+            });
+
+            renderizarTabela();
+            renderizarGraficos();
+        }
+
+        function agendarAtualizacao() {
+            clearTimeout(timerAtualizacao);
+            timerAtualizacao = setTimeout(atualizarCotacoes, 60000);
+        }
+
+        async function atualizarCotacoes() {
+            if (atualizacaoEmAndamento) {
+                return;
+            }
+            if (document.hidden) {
+                agendarAtualizacao();
+                return;
+            }
+
+            atualizacaoEmAndamento = true;
+            statusAtualizacao.textContent = 'Atualizando cotações selecionadas…';
+            try {
+                const parametros = new URLSearchParams();
+                paresSelecionados.forEach(function (par) {
+                    parametros.append('pares', par);
+                });
+                const resposta = await fetch(
+                    '/api/cotacoes/tempo-real/?' + parametros.toString()
+                );
+                const dados = await resposta.json();
+                if (!resposta.ok) {
+                    throw new Error(dados.erro || 'HTTP ' + resposta.status);
+                }
+
+                adicionarRegistros(dados.registros);
+                statusAtualizacao.textContent =
+                    'Atualizado às ' + new Date(dados.verificado_em).toLocaleTimeString('pt-BR')
+                    + ' · próxima verificação em 60 segundos.';
+            } catch (erro) {
+                statusAtualizacao.textContent =
+                    'Não foi possível atualizar agora. Os dados já carregados foram mantidos.';
+                console.error('Falha ao atualizar as cotações:', erro);
+            } finally {
+                atualizacaoEmAndamento = false;
+                agendarAtualizacao();
+            }
+        }
 
         fetch('/api/historico/')
             .then(function (resposta) {
@@ -260,95 +477,22 @@
                 return resposta.json();
             })
             .then(function (registros) {
-                if (registros.length === 0) {
-                    statusHistorico.textContent = 'Nenhuma consulta registrada ainda.';
-                    statusGrafico.textContent = 'O gráfico aparecerá após a primeira consulta.';
-                    return;
-                }
-
-                const cronologicos = registros.slice().reverse();
-                registros.forEach(function (registro) {
-                    const linha = document.createElement('tr');
-                    const valores = [
-                        registro.moeda_origem + '/' + registro.moeda_destino,
-                        registro.valor,
-                        new Date(registro.data_hora_consulta).toLocaleString('pt-BR')
-                    ];
-
-                    valores.forEach(function (valor) {
-                        const celula = document.createElement('td');
-                        celula.textContent = valor;
-                        linha.appendChild(celula);
-                    });
-                    corpoTabela.appendChild(linha);
-                });
-
-                statusHistorico.hidden = true;
-                tabelaHistorico.hidden = false;
-
-                if (typeof Chart === 'undefined') {
-                    statusGrafico.textContent = 'Não foi possível carregar a biblioteca do gráfico.';
-                    return;
-                }
-
-                const pares = [...new Set(cronologicos.map(function (registro) {
-                    return registro.moeda_origem + '/' + registro.moeda_destino;
-                }))];
-                const cores = ['#28c5ff', '#ba68ff', '#2dd4a0', '#ffb454', '#ff7385'];
-                pares.forEach(function (par, indice) {
-                    const registrosDoPar = cronologicos.filter(function (registro) {
-                        return registro.moeda_origem + '/' + registro.moeda_destino === par;
-                    });
-                    const cartao = document.createElement('article');
-                    const titulo = document.createElement('h3');
-                    const canvas = document.createElement('canvas');
-
-                    cartao.className = 'chart-item';
-                    titulo.textContent = par;
-                    canvas.setAttribute('aria-label', 'Variação histórica de ' + par);
-                    cartao.appendChild(titulo);
-                    cartao.appendChild(canvas);
-                    containerGraficos.appendChild(cartao);
-
-                    new Chart(canvas, {
-                        type: 'line',
-                        data: {
-                            labels: registrosDoPar.map(function (registro) {
-                                return new Date(registro.data_hora_consulta)
-                                    .toLocaleString('pt-BR');
-                            }),
-                            datasets: [{
-                                label: par,
-                                data: registrosDoPar.map(function (registro) {
-                                    return Number(registro.valor);
-                                }),
-                                borderColor: cores[indice % cores.length],
-                                backgroundColor: cores[indice % cores.length],
-                                tension: 0.25
-                            }]
-                        },
-                        options: {
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            interaction: { mode: 'nearest', intersect: false },
-                            scales: {
-                                x: { ticks: { color: '#91a1b9', maxTicksLimit: 6 } },
-                                y: { ticks: { color: '#91a1b9' }, beginAtZero: false }
-                            },
-                            plugins: {
-                                legend: { labels: { color: '#edf4ff' } }
-                            }
-                        }
-                    });
-                });
-                statusGrafico.hidden = true;
+                adicionarRegistros(registros);
             })
             .catch(function (erro) {
                 statusHistorico.textContent =
                     'Não foi possível carregar o histórico. Verifique sua conexão.';
                 statusGrafico.textContent = 'O gráfico não pôde ser carregado.';
                 console.error('Falha ao buscar histórico:', erro);
-            });
+            })
+            .finally(atualizarCotacoes);
+
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) {
+                clearTimeout(timerAtualizacao);
+                atualizarCotacoes();
+            }
+        });
     </script>
 </body>
 </html>

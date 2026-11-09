@@ -20,9 +20,9 @@ PAIR_LABELS = {
 }
 
 
-def _cache_key(pair):
+def _cache_key(pair, namespace):
     endpoint = hashlib.sha256(settings.COTACAO_URL.encode()).hexdigest()[:16]
-    return f"cotacao:{endpoint}:{pair}"
+    return f"cotacao:{namespace}:{endpoint}:{pair}"
 
 
 def _url_for_pairs(pairs):
@@ -58,13 +58,13 @@ def _parse_value(data, pair):
     return value
 
 
-def fetch_cotations(pairs):
-    """Busca os pares que não estão em cache e retorna (valores, pares novos)."""
+def fetch_cotations(pairs, *, cache_seconds=None, cache_namespace="standard"):
+    """Busca cotações e retorna seus valores e os pares consultados na API."""
     values = {}
     missing = []
 
     for pair in pairs:
-        cached_value = cache.get(_cache_key(pair))
+        cached_value = cache.get(_cache_key(pair, cache_namespace))
         if cached_value is None:
             missing.append(pair)
         else:
@@ -75,11 +75,16 @@ def fetch_cotations(pairs):
         resposta.raise_for_status()
         dados = resposta.json()
         fetched = {pair: _parse_value(dados, pair) for pair in missing}
+        timeout = (
+            cache_seconds
+            if cache_seconds is not None
+            else settings.COTACAO_CACHE_SECONDS
+        )
         for pair, value in fetched.items():
             cache.set(
-                _cache_key(pair),
+                _cache_key(pair, cache_namespace),
                 str(value),
-                timeout=settings.COTACAO_CACHE_SECONDS,
+                timeout=timeout,
             )
         values.update(fetched)
 

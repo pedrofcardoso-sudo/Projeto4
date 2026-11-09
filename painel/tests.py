@@ -10,6 +10,14 @@ from django.urls import reverse
 from .models import RegistroCotacao
 
 
+class HealthCheckTest(TestCase):
+    def test_endpoint_informa_que_aplicacao_esta_responsiva(self):
+        resposta = self.client.get(reverse("health-check"))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(resposta.json(), {"status": "ok"})
+
+
 def resposta_falsa(json_data, status=200):
     resposta = MagicMock()
     resposta.json.return_value = json_data
@@ -128,6 +136,20 @@ class ConsultarCotacaoTest(TestCase):
         self.assertContains(resposta, "Clima")
         self.assertContains(resposta, 'name="pares"')
 
+    @patch(
+        "painel.views.requests.get",
+        return_value=resposta_falsa({"USDBRL": {"bid": "5.1234"}}),
+    )
+    def test_pagina_inicial_redireciona_para_painel_com_atalhos(self, get):
+        resposta_inicial = self.client.get("/")
+
+        self.assertRedirects(resposta_inicial, reverse("consultar"))
+        resposta_painel = self.client.get(reverse("consultar"))
+        self.assertContains(resposta_painel, 'aria-label="Acesso rápido"')
+        self.assertContains(resposta_painel, 'href="#consulta"')
+        self.assertContains(resposta_painel, 'href="/api/historico/"')
+        self.assertContains(resposta_painel, 'href="/admin/"')
+
 
 class ClimaTest(TestCase):
     def setUp(self):
@@ -209,6 +231,20 @@ class ConsultaAgendadaTest(TestCase):
 
 
 class HistoricoAPITest(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_salva_cotacao_de_alto_valor_com_precisao_ampliada(self):
+        valor = Decimal("12345678901234.1234")
+
+        registro = RegistroCotacao.objects.create(
+            moeda_origem="BTC",
+            moeda_destino="BRL",
+            valor=valor,
+        )
+
+        self.assertEqual(registro.valor, valor)
+
     def test_lista_registros_do_mais_recente_ao_mais_antigo(self):
         antigo = RegistroCotacao.objects.create(valor=Decimal("5.0000"))
         meio = RegistroCotacao.objects.create(valor=Decimal("5.1000"))
@@ -235,3 +271,47 @@ class HistoricoAPITest(TestCase):
 
         self.assertEqual(resposta.status_code, 200)
         self.assertEqual(resposta.json(), [])
+
+    @patch("painel.views.requests.get")
+    def test_api_tempo_real_consulta_e_salva_multiplos_pares(self, get):
+        get.return_value = resposta_falsa(
+            {
+                "USDBRL": {"bid": "5.1234"},
+                "EURBRL": {"bid": "6.2345"},
+            }
+        )
+
+        resposta = self.client.get(
+            reverse("api-cotacoes-tempo-real"),
+            {"pares": ["USD-BRL", "EUR-BRL"]},
+        )
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(
+            [registro["moeda_origem"] for registro in resposta.json()["registros"]],
+            ["USD", "EUR"],
+        )
+        self.assertIn("verificado_em", resposta.json())
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(RegistroCotacao.objects.count(), 2)
+
+    @patch("painel.views.requests.get")
+    def test_api_tempo_real_nao_duplica_valor_inalterado(self, get):
+        get.return_value = resposta_falsa({"USDBRL": {"bid": "5.1234"}})
+
+        primeira = self.client.get(reverse("api-cotacoes-tempo-real"))
+        segunda = self.client.get(reverse("api-cotacoes-tempo-real"))
+
+        self.assertEqual(primeira.status_code, 200)
+        self.assertEqual(segunda.status_code, 200)
+        self.assertEqual(RegistroCotacao.objects.count(), 1)
+        self.assertEqual(get.call_count, 1)
+
+    def test_api_tempo_real_rejeita_pares_invalidos(self):
+        resposta = self.client.get(
+            reverse("api-cotacoes-tempo-real"),
+            {"pares": "XXX-YYY"},
+        )
+
+        self.assertEqual(resposta.status_code, 400)
+        self.assertEqual(RegistroCotacao.objects.count(), 0)
