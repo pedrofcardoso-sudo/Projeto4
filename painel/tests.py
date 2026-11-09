@@ -1,0 +1,237 @@
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
+
+import requests
+from django.core.cache import cache
+from django.core.management import call_command
+from django.test import TestCase
+from django.urls import reverse
+
+from .models import RegistroCotacao
+
+
+def resposta_falsa(json_data, status=200):
+    resposta = MagicMock()
+    resposta.json.return_value = json_data
+    if status >= 400:
+        resposta.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            f"HTTP {status}"
+        )
+    return resposta
+
+
+class ConsultarCotacaoTest(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    @patch("painel.views.requests.get")
+    def test_sucesso_salva_registro(self, get):
+        get.return_value = resposta_falsa({"USDBRL": {"bid": "5.1234"}})
+
+        resposta = self.client.get(reverse("consultar"))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(resposta, "Cotação registrada")
+        registro = RegistroCotacao.objects.get()
+        self.assertEqual(registro.valor, Decimal("5.1234"))
+        self.assertEqual(get.call_args.kwargs["timeout"], 5)
+
+    @patch(
+        "painel.views.requests.get",
+        side_effect=requests.exceptions.Timeout(),
+    )
+    def test_timeout_nao_quebra_a_pagina(self, get):
+        resposta = self.client.get(reverse("consultar"))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(resposta, "Não foi possível consultar")
+        self.assertEqual(RegistroCotacao.objects.count(), 0)
+
+    @patch("painel.views.requests.get")
+    def test_erro_http_da_api_nao_salva_registro(self, get):
+        get.return_value = resposta_falsa({}, status=500)
+
+        resposta = self.client.get(reverse("consultar"))
+
+        self.assertContains(resposta, "Não foi possível consultar")
+        self.assertEqual(RegistroCotacao.objects.count(), 0)
+
+    @patch("painel.views.requests.get")
+    def test_formato_inesperado_nao_salva_registro(self, get):
+        get.return_value = resposta_falsa({"outra": "coisa"})
+
+        resposta = self.client.get(reverse("consultar"))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(resposta, "formato inesperado")
+        self.assertEqual(RegistroCotacao.objects.count(), 0)
+
+    def test_template_usa_fetch_e_trata_falha(self):
+        with patch(
+            "painel.views.requests.get",
+            side_effect=requests.exceptions.ConnectionError(),
+        ):
+            resposta = self.client.get(reverse("consultar"))
+
+        self.assertContains(resposta, "fetch('/api/historico/')")
+        self.assertContains(resposta, ".catch(")
+
+    @patch("painel.views.requests.get")
+    def test_consulta_multiplos_pares_em_uma_requisicao(self, get):
+        get.return_value = resposta_falsa(
+            {
+                "USDBRL": {"bid": "5.1234"},
+                "EURBRL": {"bid": "6.2345"},
+            }
+        )
+
+        resposta = self.client.get(
+            reverse("consultar"),
+            {"pares": ["USD-BRL", "EUR-BRL"]},
+        )
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(resposta, "USD-BRL")
+        self.assertContains(resposta, "EUR-BRL")
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(RegistroCotacao.objects.count(), 2)
+
+    @patch("painel.views.requests.get")
+    def test_reutiliza_cotacao_em_cache_sem_nova_chamada_ou_registro(self, get):
+        get.return_value = resposta_falsa({"USDBRL": {"bid": "5.1234"}})
+
+        self.client.get(reverse("consultar"))
+        resposta = self.client.get(reverse("consultar"))
+
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(RegistroCotacao.objects.count(), 1)
+        self.assertContains(resposta, "recuperada do cache")
+
+    def test_pares_invalidos_nao_chamam_api(self):
+        with patch("painel.views.requests.get") as get:
+            resposta = self.client.get(
+                reverse("consultar"),
+                {"pares": "XXX-YYY"},
+            )
+
+        self.assertContains(resposta, "Selecione somente pares")
+        get.assert_not_called()
+
+    def test_tela_inclui_grafico_tempo_e_formulario_de_multiplas_moedas(self):
+        with patch(
+            "painel.views.requests.get",
+            return_value=resposta_falsa({"USDBRL": {"bid": "5.1234"}}),
+        ):
+            resposta = self.client.get(reverse("consultar"))
+
+        self.assertContains(resposta, "chart.js")
+        self.assertContains(resposta, "Clima")
+        self.assertContains(resposta, 'name="pares"')
+
+
+class ClimaTest(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    @patch("painel.weather.requests.get")
+    def test_clima_com_chave_configurada(self, get):
+        get.return_value = resposta_falsa(
+            {
+                "name": "Brasília",
+                "main": {"temp": 21.5},
+                "weather": [{"description": "céu limpo"}],
+            }
+        )
+
+        with self.settings(OPENWEATHERMAP_API_KEY="teste-chave"):
+            resposta = self.client.get(reverse("consultar"))
+
+        self.assertContains(resposta, "21,5")
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(
+            get.call_args_list[1].kwargs["params"]["appid"],
+            "teste-chave",
+        )
+
+    @patch("painel.weather.requests.get")
+    def test_sem_chave_clima_exibe_instrucao_sem_chamar_api(self, get):
+        get.return_value = resposta_falsa({"USDBRL": {"bid": "5.1234"}})
+
+        with self.settings(OPENWEATHERMAP_API_KEY=""):
+            resposta = self.client.get(reverse("consultar"))
+
+        self.assertContains(resposta, "Configure OPENWEATHERMAP_API_KEY")
+        self.assertEqual(get.call_count, 1)
+        self.assertIn("/json/last/", get.call_args.args[0])
+
+    @patch(
+        "painel.weather.requests.get",
+        side_effect=[
+            resposta_falsa({"USDBRL": {"bid": "5.1234"}}),
+            requests.exceptions.Timeout(),
+        ],
+    )
+    def test_falha_da_api_de_clima_nao_quebra_o_painel(self, get):
+        with self.settings(OPENWEATHERMAP_API_KEY="teste-chave"):
+            resposta = self.client.get(reverse("consultar"))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(resposta, "Não foi possível consultar o clima")
+
+
+class ConsultaAgendadaTest(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    @patch("painel.services.requests.get")
+    def test_comando_agendavel_salva_pares_e_reaproveita_cache(self, get):
+        get.return_value = resposta_falsa(
+            {
+                pair.replace("-", ""): {"bid": "5.1234"}
+                for pair in (
+                    "USD-BRL",
+                    "EUR-BRL",
+                    "GBP-BRL",
+                    "BTC-BRL",
+                    "USD-EUR",
+                    "EUR-USD",
+                    "BTC-USD",
+                    "BTC-EUR",
+                )
+            }
+        )
+
+        call_command("consultar_cotacoes")
+        call_command("consultar_cotacoes")
+
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(RegistroCotacao.objects.count(), 8)
+
+
+class HistoricoAPITest(TestCase):
+    def test_lista_registros_do_mais_recente_ao_mais_antigo(self):
+        antigo = RegistroCotacao.objects.create(valor=Decimal("5.0000"))
+        meio = RegistroCotacao.objects.create(valor=Decimal("5.1000"))
+        recente = RegistroCotacao.objects.create(valor=Decimal("5.2000"))
+
+        resposta = self.client.get(reverse("api-historico"))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(
+            [registro["id"] for registro in resposta.json()],
+            [recente.id, meio.id, antigo.id],
+        )
+
+    def test_endpoint_e_somente_leitura(self):
+        resposta = self.client.post(
+            reverse("api-historico"),
+            {"valor": "1.0000"},
+        )
+
+        self.assertEqual(resposta.status_code, 405)
+
+    def test_historico_vazio_retorna_lista_vazia(self):
+        resposta = self.client.get(reverse("api-historico"))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(resposta.json(), [])
