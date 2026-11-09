@@ -177,6 +177,7 @@ class ConsultarCotacaoTest(TestCase):
 
         self.assertContains(resposta, "chart.js")
         self.assertContains(resposta, "Clima")
+        self.assertContains(resposta, "usamos taxas da Coinbase")
         self.assertContains(resposta, 'name="pares"')
 
     @patch(
