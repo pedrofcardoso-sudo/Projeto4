@@ -1,3 +1,5 @@
+import logging
+
 import requests
 from django.conf import settings
 from django.http import JsonResponse
@@ -10,6 +12,9 @@ from .models import RegistroCotacao
 from .services import PAIR_LABELS, fetch_cotations
 from .serializers import RegistroCotacaoSerializer
 from .weather import get_weather
+
+
+logger = logging.getLogger(__name__)
 
 
 @require_GET
@@ -34,7 +39,13 @@ def atualizar_cotacoes_tempo_real(request):
             cache_seconds=settings.COTACAO_LIVE_CACHE_SECONDS,
             cache_namespace="live",
         )
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        logger.warning(
+            "Falha na atualização de cotações: %s (HTTP %s)",
+            type(exc).__name__,
+            status_code or "sem resposta HTTP",
+        )
         return JsonResponse(
             {"erro": "Não foi possível atualizar as cotações neste momento."},
             status=503,
@@ -104,7 +115,15 @@ def consultar_cotacao(request):
                         "cacheada": pair not in fresh_pairs,
                     }
                 )
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as exc:
+            status_code = (
+                exc.response.status_code if exc.response is not None else None
+            )
+            logger.warning(
+                "Falha na consulta de cotações: %s (HTTP %s)",
+                type(exc).__name__,
+                status_code or "sem resposta HTTP",
+            )
             erro = (
                 "Não foi possível consultar as cotações agora. "
                 "Tente novamente em instantes."

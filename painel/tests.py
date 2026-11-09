@@ -22,9 +22,9 @@ def resposta_falsa(json_data, status=200):
     resposta = MagicMock()
     resposta.json.return_value = json_data
     if status >= 400:
-        resposta.raise_for_status.side_effect = requests.exceptions.HTTPError(
-            f"HTTP {status}"
-        )
+        erro = requests.exceptions.HTTPError(f"HTTP {status}")
+        erro.response = MagicMock(status_code=status)
+        resposta.raise_for_status.side_effect = erro
     return resposta
 
 
@@ -49,19 +49,23 @@ class ConsultarCotacaoTest(TestCase):
         side_effect=requests.exceptions.Timeout(),
     )
     def test_timeout_nao_quebra_a_pagina(self, get):
-        resposta = self.client.get(reverse("consultar"))
+        with self.assertLogs("painel.views", level="WARNING") as logs:
+            resposta = self.client.get(reverse("consultar"))
 
         self.assertEqual(resposta.status_code, 200)
         self.assertContains(resposta, "Não foi possível consultar")
+        self.assertIn("Timeout", logs.output[0])
         self.assertEqual(RegistroCotacao.objects.count(), 0)
 
     @patch("painel.views.requests.get")
     def test_erro_http_da_api_nao_salva_registro(self, get):
         get.return_value = resposta_falsa({}, status=500)
 
-        resposta = self.client.get(reverse("consultar"))
+        with self.assertLogs("painel.views", level="WARNING") as logs:
+            resposta = self.client.get(reverse("consultar"))
 
         self.assertContains(resposta, "Não foi possível consultar")
+        self.assertIn("HTTP 500", logs.output[0])
         self.assertEqual(RegistroCotacao.objects.count(), 0)
 
     @patch("painel.views.requests.get")

@@ -4,6 +4,13 @@ Aplicação Django que consome a AwesomeAPI, guarda cotações no SQLite, expõe
 histórico por uma API REST e desenha sua variação no navegador. Também pode
 mostrar o clima atual da cidade configurada usando a OpenWeatherMap.
 
+## Site publicado
+
+Acesse o [Painel de Cotações & Clima](https://projeto4-1ry2.onrender.com/).
+Ele roda na nuvem, sem depender do computador local. No plano gratuito do
+Render, o serviço pode suspender após inatividade e levar alguns segundos para
+acordar.
+
 ## Funcionalidades
 
 - Consulta de vários pares de moedas em uma única requisição:
