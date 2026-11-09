@@ -1,8 +1,10 @@
 # Painel de Cotações & Clima — Projeto 4
 
-Aplicação Django que consome a AwesomeAPI, guarda cotações no SQLite, expõe o
-histórico por uma API REST e desenha sua variação no navegador. Também pode
-mostrar o clima atual da cidade configurada usando a OpenWeatherMap.
+Aplicação Django que consome a AwesomeAPI, guarda cotações no banco local ou
+PostgreSQL hospedado, expõe o histórico por uma API REST e desenha sua variação
+no navegador. Se a AwesomeAPI limitar as chamadas, o painel usa as taxas
+públicas da Coinbase como alternativa. Também pode mostrar o clima atual da
+cidade configurada usando a OpenWeatherMap.
 
 ## Site publicado
 
@@ -15,6 +17,8 @@ acordar.
 
 - Consulta de vários pares de moedas em uma única requisição:
   USD/BRL, EUR/BRL, GBP/BRL, BTC/BRL, USD/EUR, EUR/USD, BTC/USD e BTC/EUR.
+- Fallback para as taxas públicas da Coinbase quando a AwesomeAPI retorna
+  limite de requisições HTTP 429.
 - Cache em memória das cotações por 5 minutos para evitar chamadas externas
   repetidas; o cache armazena valores por par e por URL de API configurada.
 - Persistência das consultas novas usando `DecimalField`.

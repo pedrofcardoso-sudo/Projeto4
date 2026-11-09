@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit, urlunsplit
@@ -18,6 +19,8 @@ PAIR_LABELS = {
     "BTC-USD": "Bitcoin / Dólar americano",
     "BTC-EUR": "Bitcoin / Euro",
 }
+COINBASE_RATES_URL = "https://api.coinbase.com/v2/exchange-rates"
+logger = logging.getLogger(__name__)
 
 
 def _cache_key(pair, namespace):
@@ -58,6 +61,43 @@ def _parse_value(data, pair):
     return value
 
 
+def _parse_fallback_rate(rates, currency):
+    try:
+        value = Decimal(str(rates[currency]))
+    except (KeyError, TypeError, InvalidOperation) as exc:
+        raise ValueError(
+            f"A API alternativa não retornou uma taxa válida para {currency}."
+        ) from exc
+    if not value.is_finite() or value <= 0:
+        raise ValueError(
+            f"A API alternativa não retornou uma taxa válida para {currency}."
+        )
+    return value
+
+
+def _fetch_fallback_cotations(pairs):
+    response = requests.get(
+        COINBASE_RATES_URL,
+        params={"currency": "USD"},
+        timeout=5,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
+        raise ValueError("A API alternativa respondeu em um formato inesperado.")
+    rates = data["data"].get("rates")
+    if not isinstance(rates, dict) or data["data"].get("currency") != "USD":
+        raise ValueError("A API alternativa respondeu em um formato inesperado.")
+
+    values = {}
+    for pair in pairs:
+        source, target = pair.split("-")
+        source_rate = _parse_fallback_rate(rates, source)
+        target_rate = _parse_fallback_rate(rates, target)
+        values[pair] = target_rate / source_rate
+    return values
+
+
 def fetch_cotations(pairs, *, cache_seconds=None, cache_namespace="standard"):
     """Busca cotações e retorna seus valores e os pares consultados na API."""
     values = {}
@@ -71,10 +111,19 @@ def fetch_cotations(pairs, *, cache_seconds=None, cache_namespace="standard"):
             values[pair] = Decimal(cached_value)
 
     if missing:
-        resposta = requests.get(_url_for_pairs(missing), timeout=5)
-        resposta.raise_for_status()
-        dados = resposta.json()
-        fetched = {pair: _parse_value(dados, pair) for pair in missing}
+        try:
+            response = requests.get(_url_for_pairs(missing), timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            fetched = {pair: _parse_value(data, pair) for pair in missing}
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 429:
+                raise
+            logger.warning(
+                "AwesomeAPI retornou HTTP 429; usando o provedor alternativo."
+            )
+            fetched = _fetch_fallback_cotations(missing)
+
         timeout = (
             cache_seconds
             if cache_seconds is not None

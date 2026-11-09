@@ -8,6 +8,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from .models import RegistroCotacao
+from .services import fetch_cotations
 
 
 class HealthCheckTest(TestCase):
@@ -16,6 +17,44 @@ class HealthCheckTest(TestCase):
 
         self.assertEqual(resposta.status_code, 200)
         self.assertEqual(resposta.json(), {"status": "ok"})
+
+
+class CotacaoFallbackTest(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    @patch("painel.services.requests.get")
+    def test_limite_da_awesomeapi_usa_taxas_da_coinbase(self, get):
+        erro = requests.exceptions.HTTPError("HTTP 429")
+        erro.response = MagicMock(status_code=429)
+        resposta_awesomeapi = MagicMock()
+        resposta_awesomeapi.raise_for_status.side_effect = erro
+        resposta_coinbase = resposta_falsa(
+            {
+                "data": {
+                    "currency": "USD",
+                    "rates": {
+                        "USD": "1",
+                        "BRL": "5",
+                        "EUR": "0.8",
+                        "BTC": "0.00002",
+                    },
+                }
+            }
+        )
+        get.side_effect = [resposta_awesomeapi, resposta_coinbase]
+
+        with self.assertLogs("painel.services", level="WARNING"):
+            valores, consultados = fetch_cotations(
+                ["USD-BRL", "EUR-BRL", "BTC-BRL"],
+                cache_namespace="fallback-test",
+            )
+
+        self.assertEqual(valores["USD-BRL"], Decimal("5"))
+        self.assertEqual(valores["EUR-BRL"], Decimal("6.25"))
+        self.assertEqual(valores["BTC-BRL"], Decimal("250000"))
+        self.assertEqual(consultados, {"USD-BRL", "EUR-BRL", "BTC-BRL"})
+        self.assertEqual(get.call_count, 2)
 
 
 def resposta_falsa(json_data, status=200):
