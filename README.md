@@ -99,6 +99,23 @@ Outras configurações:
 | `/admin/` | — | Administração dos registros e usuários do Django |
 
 Para criar uma conta de administração, use `python manage.py createsuperuser`.
+Essa conta é criada no banco configurado para o ambiente em que o comando foi
+executado. No computador local, ela não é compartilhada com o site publicado.
+
+### Administração do site publicado
+
+O site no Render usa o banco PostgreSQL remoto configurado em `DATABASE_URL`;
+o SQLite local é independente. Portanto, comandos de administração executados
+no PowerShell local alteram somente o banco local. O plano Free do Render não
+oferece Shell para executar comandos Django no serviço.
+
+Crie ou redefina contas administrativas somente por um procedimento
+administrativo autenticado que acesse o banco remoto correto. Não altere
+diretamente as tabelas internas `auth_user` pelo SQL Editor: isso pode ignorar
+validações, migrations e outras regras do Django. Nunca coloque senhas,
+hashes de senha ou URLs privadas do banco no código, README, commits ou chat.
+Após o primeiro acesso com uma senha temporária, troque-a imediatamente no
+Django Admin.
 
 ## Cache
 
